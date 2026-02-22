@@ -15,14 +15,14 @@ A decentralized, privacy-preserving Federated Learning system that combines:
 gossip_fl/
 ├── device.py           # EdgeDevice class, resource profiling, dynamic k
 ├── topology.py         # Topology construction, saturation handling, add_device()
-├── data_loader.py      # MNIST loading, IID and Non-IID distribution    [Step 2]
+├── data_loader.py      # MNIST loading, IID and Non-IID distribution
 ├── compression.py      # DCT-based gradient compression                 [Step 3]
 ├── privacy.py          # Differential privacy (Gaussian noise)          [Step 3]
 ├── gossip.py           # Gossip exchange, Byzantine detection            [Step 4]
 ├── main.py             # Full training loop, 30 rounds                  [Step 5]
 │
 ├── test_step1.py       # Test: device creation + topology
-├── test_step2.py       # Test: MNIST distribution                       [Step 2]
+├── test_step2.py       # Test: MNIST distribution
 ├── test_step3.py       # Test: compression + privacy                    [Step 3]
 ├── test_step4.py       # Test: gossip + Byzantine detection              [Step 4]
 └── test_step5.py       # Test: full training run                        [Step 5]
@@ -84,6 +84,32 @@ Total Edges : 74  |  Average k : 7.40  |  Connected : True  |  Diameter : 3
 
 ---
 
+### Step 2 — MNIST Data Loading and Distribution
+```bash
+python test_step2.py
+```
+**What it does:**
+- Downloads MNIST dataset automatically (saved to `data/` folder)
+- Distributes training data across 20 devices using IID mode
+- Also demonstrates Non-IID distribution for comparison
+- Saves `distribution_iid.png` and `distribution_non_iid.png`
+
+**IID vs Non-IID:**
+| Mode | Description | Used for |
+|------|-------------|---------|
+| IID | Each device gets all 10 digit classes equally | Main experiment (matches paper) |
+| Non-IID | Each device gets only 2 digit classes | Ablation study / comparison |
+
+**Expected output:**
+```
+Train: torch.Size([60000, 1, 28, 28])  |  Test: torch.Size([10000, 1, 28, 28])
+
+IID   — Device 1: 3000 samples | 0:297  1:305  2:301  3:298 ... (all classes)
+Non-IID — Device 1: 3000 samples | 5:1500  9:1500           (only 2 classes)
+```
+
+---
+
 ## Core Algorithms
 
 ### Resource Score (Paper Eq. 1–4)
@@ -105,18 +131,26 @@ where k_min = 3 and k_max = 10.
 3. Handle saturation via capacity relaxation
 4. Guarantee connectivity with DFS bridge-edge insertion
 
+### Data Preprocessing (Paper Section III-C)
+- Pixel values scaled to range [0, 1]
+- Reshaped into 4D format [N, 1, 28, 28] for CNN input
+- Training set distributed proportionately across all devices
+
 ---
 
 ## Key Design Decisions
 
-**Why varied specs within the same device type?**  
-Real-world devices of the same category (e.g., laptops) differ in CPU speed, RAM, and bandwidth. Using fixed specs for all laptops would make k identical for all of them — defeating the purpose of dynamic assignment.
+**Why varied specs within the same device type?**
+Real-world devices of the same category (e.g., laptops) differ in CPU speed, RAM, and bandwidth. Using fixed specs for all laptops would make k identical — defeating the purpose of dynamic assignment.
 
-**Why seed = device_id?**  
+**Why seed = device_id?**
 Using the device ID as the random seed ensures reproducible results across runs. The same device always gets the same hardware specs, making experiments comparable.
 
-**Why is Device 17 Byzantine?**  
-Device 17 is the highest-resource desktop, making it a worst-case attacker — it has the most neighbors and the most influence on the network. The Byzantine detection module must identify and down-weight it during aggregation.
+**Why is Device 17 Byzantine?**
+Device 17 is the highest-resource desktop, making it a worst-case attacker — it has the most neighbors and the most influence on the network.
+
+**Why IID for main experiment?**
+The base paper distributes data proportionately across clients without specifying Non-IID. IID is the closest match and provides a fair baseline. Non-IID is included for ablation studies.
 
 ---
 
@@ -133,7 +167,7 @@ Device 17 is the highest-resource desktop, making it a worst-case attacker — i
 | Step | Module | Status |
 |------|--------|--------|
 | 1 | device.py, topology.py | ✅ Complete |
-| 2 | data_loader.py | 🔄 In progress |
+| 2 | data_loader.py | ✅ Complete |
 | 3 | compression.py, privacy.py | ⏳ Pending |
 | 4 | gossip.py | ⏳ Pending |
 | 5 | main.py | ⏳ Pending |
