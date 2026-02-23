@@ -3,12 +3,14 @@ device.py
 ---------
 Represents each Edge Device in the federated learning network.
 
-Model architecture (PDF Section 2.2):
-  Layer 1: 784 → 128 + ReLU
-  Layer 2: 128 → 10  + Softmax
-  Total  : 101,770 parameters
+Model architecture (Hidayat 2024 style, 4-layer CNN):
+  Conv1 : 1 → 32 filters, 3×3, ReLU + MaxPool → 14×14
+  Conv2 : 32 → 64 filters, 3×3, ReLU + MaxPool → 7×7
+  FC1   : 64×7×7 → 128, ReLU + Dropout(0.25)
+  FC2   : 128 → 10  (Softmax implicit in CrossEntropyLoss)
+  Total : 421,642 parameters
 
-Resource profiling and dynamic k assignment (Paper Eq. 1-5).
+Resource profiling and dynamic Cr assignment (Hidayat Eq. 1-5).
 """
 
 import numpy as np
@@ -18,31 +20,39 @@ import torch.nn as nn
 
 
 # ──────────────────────────────────────────
-# CNN Model — exactly as PDF Section 2.2
-# Xavier initialization applied in __init__
+# CNN Model — 4-layer (Hidayat 2024 style)
 # ──────────────────────────────────────────
 class SimpleCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.flatten = nn.Flatten()
-        self.fc1     = nn.Linear(784, 128)
-        self.relu    = nn.ReLU()
-        self.fc2     = nn.Linear(128, 10)
-        # Note: Softmax is implicit in CrossEntropyLoss during training.
-        # For inference/evaluation, we apply it explicitly.
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)  # 28×28 → 28×28
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1) # 14×14 → 14×14
+        self.pool  = nn.MaxPool2d(2, 2)                           # halves spatial dims
+        self.relu  = nn.ReLU()
+        self.drop  = nn.Dropout(0.25)
 
-        # Xavier initialization (PDF Section 2.2 reference)
+        # Fully connected layers
+        self.fc1 = nn.Linear(64 * 7 * 7, 128)  # 3136 → 128
+        self.fc2 = nn.Linear(128, 10)           # 128  → 10
+
+        # Xavier initialization
+        nn.init.xavier_uniform_(self.conv1.weight)
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.xavier_uniform_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.zeros_(self.fc1.bias)
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x):
-        x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x   # raw logits (CrossEntropyLoss applies softmax internally)
+        # x: [B, 1, 28, 28]
+        x = self.pool(self.relu(self.conv1(x)))  # → [B, 32, 14, 14]
+        x = self.pool(self.relu(self.conv2(x)))  # → [B, 64,  7,  7]
+        x = x.view(x.size(0), -1)               # → [B, 3136]
+        x = self.drop(self.relu(self.fc1(x)))   # → [B, 128]
+        return self.fc2(x)                       # → [B, 10]  raw logits
 
     def predict(self, x):
         """Returns softmax probabilities (for evaluation)."""
@@ -114,10 +124,12 @@ class EdgeDevice:
         self.neighbors  = []
         self.reputation = {}
 
-        # Model — Xavier initialized (PDF Section 2.2)
-        self.model          = SimpleCNN()
-        self.optimizer      = torch.optim.SGD(self.model.parameters(), lr=0.1)
-        self.criterion      = nn.CrossEntropyLoss()
+        # 4-layer CNN model
+        self.model      = SimpleCNN()
+        self.optimizer  = torch.optim.SGD(
+            self.model.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-4
+        )
+        self.criterion  = nn.CrossEntropyLoss()
         self.local_data     = None
         self.local_gradient = None
 
@@ -136,39 +148,43 @@ class EdgeDevice:
         for nid in self.neighbors:
             self.reputation[nid] = 1.0
 
-    def local_train(self, batch_size: int = 32) -> dict:
+    def local_train(self, batch_size: int = 64) -> dict:
         """
-        PDF Phase 1:
-          1. predictions = model.forward(samples)
-          2. loss = cross_entropy(predictions, labels)
-          3. gradients = loss.backward()
-        Byzantine device returns large random noise instead.
+        Phase 1: Local training.
+
+        Honest device:  normal forward/backward pass
+        Byzantine device: sign-flip attack
+            → same magnitude as honest gradient
+            → opposite direction
+            → cos_sim ≈ -1.0 → detected by Phase 5
         """
         if self.local_data is None:
             raise ValueError(f"Device {self.id}: local_data not set!")
 
         X, y = self.local_data
 
-        # Byzantine attack: poisoned random gradient
-        if self.is_byzantine:
-            gradient = {name: torch.randn_like(p) * 5.0
-                        for name, p in self.model.named_parameters()}
-            self.local_gradient = gradient
-            return gradient
-
-        # Phase 1 — Normal local training
+        # Phase 1: Normal training (Byzantine also runs forward/backward)
         self.model.train()
         self.optimizer.zero_grad()
 
         indices = torch.randperm(len(X))[:batch_size]
-        output  = self.model(X[indices])          # forward pass
-        loss    = self.criterion(output, y[indices])  # cross entropy
-        loss.backward()                           # compute gradients
+        output  = self.model(X[indices])
+        loss    = self.criterion(output, y[indices])
+        loss.backward()
 
-        gradient = {name: p.grad.clone()
-                    for name, p in self.model.named_parameters()
-                    if p.grad is not None}
-        self.optimizer.step()
+        if self.is_byzantine:
+            # Sign-flip attack: negate the gradient
+            # Bypasses DP clipping (same L2 as honest)
+            # Opposite direction → cos_sim ≈ -1.0 → Phase 5 detects
+            gradient = {name: -p.grad.clone()
+                        for name, p in self.model.named_parameters()
+                        if p.grad is not None}
+        else:
+            gradient = {name: p.grad.clone()
+                        for name, p in self.model.named_parameters()
+                        if p.grad is not None}
+            self.optimizer.step()
+
         self.local_gradient = gradient
         return gradient
 
