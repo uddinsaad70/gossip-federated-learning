@@ -1,6 +1,7 @@
 # Gossip-Based Federated Learning with Byzantine Tolerance
 
 A decentralized, privacy-preserving Federated Learning system that combines:
+
 - **Resource-Adaptive Dynamic Topology** — each device gets a personalized neighbor count based on its hardware capabilities
 - **Gossip Protocol** — decentralized model exchange without a central server
 - **Differential Privacy** — gradient noise injection before sharing
@@ -16,16 +17,12 @@ gossip_fl/
 ├── device.py           # EdgeDevice class, resource profiling, dynamic k
 ├── topology.py         # Topology construction, saturation handling, add_device()
 ├── data_loader.py      # MNIST loading, IID and Non-IID distribution
-├── compression.py      # DCT-based gradient compression                 [Step 3]
-├── privacy.py          # Differential privacy (Gaussian noise)          [Step 3]
-├── gossip.py           # Gossip exchange, Byzantine detection            [Step 4]
-├── main.py             # Full training loop, 30 rounds                  [Step 5]
-│
-├── test_step1.py       # Test: device creation + topology
-├── test_step2.py       # Test: MNIST distribution
-├── test_step3.py       # Test: compression + privacy                    [Step 3]
-├── test_step4.py       # Test: gossip + Byzantine detection              [Step 4]
-└── test_step5.py       # Test: full training run                        [Step 5]
+├── grad_compression.py # DCT-based gradient compression                 [Phase 2]
+├── privacy.py          # Differential privacy (Gaussian noise)          [Phase 3]
+├── gossip.py           # Gossip exchange                                 [Phase 4]
+├── byzantine.py        # Quality assessment & Byzantine detection        [Phase 5]
+├── aggregation.py      # Weighted aggregation & model update             [Phase 6]
+└── main.py             # Full training loop, 200 rounds
 ```
 
 ---
@@ -33,20 +30,25 @@ gossip_fl/
 ## System Overview
 
 ### Network Configuration
-| Parameter | Value |
-|-----------|-------|
-| Total devices (N) | 20 |
-| Byzantine devices | 1 (Device 17) |
-| Training rounds (T) | 30 |
-| Dataset | MNIST (60,000 train / 10,000 test) |
-| Model | Simple CNN (101,770 parameters) |
+
+| Parameter           | Value                              |
+| ------------------- | ---------------------------------- |
+| Total devices (N)   | 20                                 |
+| Byzantine devices   | 1 (Device 17)                      |
+| Training rounds (T) | 200                                |
+| Dataset             | MNIST (60,000 train / 10,000 test) |
+| Model               | 4-layer CNN (421,642 parameters)   |
+| Batch size          | 64                                 |
+| Base learning rate  | 0.01 (SGD + momentum=0.9)          |
+| LR decay            | ×0.95 every 50 rounds              |
 
 ### Device Distribution
-| Device Type | Count | IDs | R range | k range |
-|-------------|-------|-----|---------|---------|
-| Raspberry Pi (low) | 6 | 1–6 | 0.14–0.28 | 3–4 |
-| Laptop (medium) | 10 | 7–16 | 0.46–1.27 | 6–10 |
-| Desktop (high) | 4 | 17–20 | 1.61–3.07 | 10 |
+
+| Device Type        | Count | IDs   | R range   | k range |
+| ------------------ | ----- | ----- | --------- | ------- |
+| Raspberry Pi (low) | 6     | 1–6   | 0.14–0.28 | 3–4     |
+| Laptop (medium)    | 10    | 7–16  | 0.46–1.27 | 6–10    |
+| Desktop (high)     | 4     | 17–20 | 1.61–3.07 | 10      |
 
 ---
 
@@ -60,52 +62,8 @@ pip install torch torchvision numpy networkx matplotlib scipy
 
 ## Usage
 
-Run each step independently to build and validate the system incrementally.
-
-### Step 1 — Device Creation and Topology
 ```bash
-python test_step1.py
-```
-**What it does:**
-- Creates 20 devices with varied hardware specs
-- Computes resource score R(i) and dynamic neighbor count k(i) for each device
-- Builds the network graph using the greedy algorithm
-- Demonstrates dynamic device addition (Device 21 joins)
-- Saves `topology_20devices.png` and `topology_21devices.png`
-
-**Expected output:**
-```
-Device  1 (raspberry_pi) | R=0.145 | k=4
-Device  7 (laptop      ) | R=1.266 | k=10
-Device 17 (desktop     ) | R=3.068 | k=10 [BYZANTINE]
-
-Total Edges : 74  |  Average k : 7.40  |  Connected : True  |  Diameter : 3
-```
-
----
-
-### Step 2 — MNIST Data Loading and Distribution
-```bash
-python test_step2.py
-```
-**What it does:**
-- Downloads MNIST dataset automatically (saved to `data/` folder)
-- Distributes training data across 20 devices using IID mode
-- Also demonstrates Non-IID distribution for comparison
-- Saves `distribution_iid.png` and `distribution_non_iid.png`
-
-**IID vs Non-IID:**
-| Mode | Description | Used for |
-|------|-------------|---------|
-| IID | Each device gets all 10 digit classes equally | Main experiment (matches paper) |
-| Non-IID | Each device gets only 2 digit classes | Ablation study / comparison |
-
-**Expected output:**
-```
-Train: torch.Size([60000, 1, 28, 28])  |  Test: torch.Size([10000, 1, 28, 28])
-
-IID   — Device 1: 3000 samples | 0:297  1:305  2:301  3:298 ... (all classes)
-Non-IID — Device 1: 3000 samples | 5:1500  9:1500           (only 2 classes)
+python main.py
 ```
 
 ---
@@ -113,6 +71,7 @@ Non-IID — Device 1: 3000 samples | 5:1500  9:1500           (only 2 classes)
 ## Core Algorithms
 
 ### Resource Score (Paper Eq. 1–4)
+
 ```
 R(i) = 0.4 × (cores × freq / 10)
      + 0.4 × (RAM_GB / 32)
@@ -120,18 +79,22 @@ R(i) = 0.4 × (cores × freq / 10)
 ```
 
 ### Dynamic Neighbor Count (Paper Eq. 5)
+
 ```
 k(i) = clip( k_min + floor(R(i) × (k_max − k_min)), k_min, k_max )
 ```
+
 where k_min = 3 and k_max = 10.
 
 ### Topology Construction
+
 1. Sort devices by R(i) descending
 2. Greedily assign neighbors (highest unmet demand first)
 3. Handle saturation via capacity relaxation
 4. Guarantee connectivity with DFS bridge-edge insertion
 
 ### Data Preprocessing (Paper Section III-C)
+
 - Pixel values scaled to range [0, 1]
 - Reshaped into 4D format [N, 1, 28, 28] for CNN input
 - Training set distributed proportionately across all devices
@@ -156,18 +119,19 @@ The base paper distributes data proportionately across clients without specifyin
 
 ## References
 
-1. Hidayat, M. A., Nakamura, Y., & Arakawa, Y. (2024). *Privacy-Preserving Federated Learning With Resource-Adaptive Compression for Edge Devices.* IEEE Internet of Things Journal, 11(8).
-2. Koloskova, A., et al. (2020). *Decentralized Stochastic Optimization and Gossip Algorithms with Compressed Communication.* ICML.
-3. McMahan, B., et al. (2017). *Communication-Efficient Learning of Deep Networks from Decentralized Data.* AISTATS.
+1. Hidayat, M. A., Nakamura, Y., & Arakawa, Y. (2024). _Privacy-Preserving Federated Learning With Resource-Adaptive Compression for Edge Devices._ IEEE Internet of Things Journal, 11(8).
+2. Koloskova, A., et al. (2020). _Decentralized Stochastic Optimization and Gossip Algorithms with Compressed Communication._ ICML.
+3. McMahan, B., et al. (2017). _Communication-Efficient Learning of Deep Networks from Decentralized Data._ AISTATS.
 
 ---
 
 ## Status
 
-| Step | Module | Status |
-|------|--------|--------|
-| 1 | device.py, topology.py | ✅ Complete |
-| 2 | data_loader.py | ✅ Complete |
-| 3 | compression.py, privacy.py | ⏳ Pending |
-| 4 | gossip.py | ⏳ Pending |
-| 5 | main.py | ⏳ Pending |
+| Phase | Module                          | Status                                                     |
+| ----- | ------------------------------- | ---------------------------------------------------------- |
+| 1     | device.py, topology.py          | ✅ Complete                                                |
+| 2     | data_loader.py                  | ✅ Complete                                                |
+| 3     | grad_compression.py, privacy.py | ✅ Complete                                                |
+| 4     | gossip.py                       | ✅ Complete                                                |
+| 5     | byzantine.py                    | ⚠️ Complete — Byzantine detection issue present, needs fix |
+| 6     | aggregation.py, main.py         | ✅ Complete                                                |
