@@ -44,8 +44,35 @@ def flatten_noisy(noisy_gradient: dict) -> np.ndarray:
     ])
 
 
+def flatten_compressed(compressed_gradient: dict) -> np.ndarray:
+    """
+    Flatten compressed gradient (Phase 2 output) to 1D.
+    Pre-noise: used for detection when comparing own vs received.
+    Sign-flip clearly visible here (cos_sim = -1.0).
+    """
+    return np.concatenate([
+        pkg["data"].detach().numpy().flatten()
+        for pkg in compressed_gradient.values()
+    ])
+
+
 def flatten_message(msg: dict) -> np.ndarray:
-    """Flatten received message gradient to 1D — stays in DCT domain."""
+    """
+    Flatten received message for Byzantine detection.
+    Uses 'compressed' field (pre-noise, Phase 2 output) if available.
+    Falls back to 'gradient' (noisy) if not.
+
+    Why compressed?
+        Sign-flip attack: cos_sim(compressed_own, compressed_recv) = -1.0
+        Sign-flip + noise: cos_sim(noisy_own, noisy_recv) ≈ 0  (undetectable)
+        noise_L2 = 0.1 × √421642 = 64.9 >> gradient_L2 ≈ 0.03
+    """
+    if msg.get("compressed"):
+        return np.concatenate([
+            tensor.detach().numpy().flatten()
+            for tensor in msg["compressed"].values()
+        ])
+    # fallback: noisy domain
     return np.concatenate([
         tensor.detach().numpy().flatten()
         for tensor in msg["gradient"].values()
@@ -98,29 +125,45 @@ def compute_quality(own: np.ndarray, recv: np.ndarray) -> tuple:
 
 # ── Main Phase 5 Function ──────────────────────────
 def assess_received_gradients(device, received_messages: list,
-                               own_noisy: dict) -> dict:
+                               own_noisy: dict,
+                               own_compressed: dict = None) -> dict:
     """
     For each received message:
-        1. Flatten own noisy gradient (DCT domain)
-        2. Flatten received gradient  (DCT domain)
+        1. Flatten own compressed gradient (Phase 2 — pre-noise, clean signal)
+        2. Flatten received compressed gradient (msg["compressed"] — pre-noise)
         3. Compute quality score
         4. Update reputation
+
+    Why pre-noise (compressed) for detection?
+        noise_L2 = σ × √n = 0.1 × √421,642 = 64.9
+        signal_L2 ≈ 0.03
+        SNR = 0.03 / 64.9 = 0.00046  → noise completely masks signal
+        cos_sim(noisy_own, noisy_recv) ≈ 0 for EVERYONE (undetectable)
+
+        But in compressed domain (pre-noise):
+        cos_sim(compressed_own, sign_flipped_recv) = -1.0 → DETECTED ✓
 
     Parameters
     ----------
     device            : EdgeDevice
     received_messages : list of messages from Phase 4
     own_noisy         : device's noisy_gradient (Phase 3 output)
+    own_compressed    : device's compressed gradient (Phase 2 output, pre-noise)
     """
     if own_noisy is None or not received_messages:
         return {}
 
-    own_flat       = flatten_noisy(own_noisy)
+    # Use compressed (pre-noise) for detection if available
+    if own_compressed is not None:
+        own_flat = flatten_compressed(own_compressed)
+    else:
+        own_flat = flatten_noisy(own_noisy)
+
     quality_scores = {}
 
     for msg in received_messages:
         sender_id = msg["sender"]
-        recv_flat = flatten_message(msg)
+        recv_flat = flatten_message(msg)  # uses compressed if available
 
         n        = min(len(own_flat), len(recv_flat))
         own_cmp  = own_flat[:n]
@@ -146,17 +189,24 @@ def assess_received_gradients(device, received_messages: list,
 
 
 def run_phase5(devices: list, received: dict,
-               noisy_gradients: dict) -> dict:
+               noisy_gradients: dict,
+               compressed_gradients: dict = None) -> dict:
     """
     Run Phase 5 for all devices.
 
     Parameters
     ----------
-    noisy_gradients : {device_id: noisy_gradient}  — Phase 3 output
+    noisy_gradients      : {device_id: noisy_gradient}    — Phase 3 output
+    compressed_gradients : {device_id: compressed_gradient} — Phase 2 output
+                           If provided, detection uses pre-noise signal.
+                           Enables detection of sign-flip attacks.
     """
     all_quality = {}
     for d in devices:
-        msgs      = received.get(d.id, [])
-        own_noisy = noisy_gradients.get(d.id)
-        all_quality[d.id] = assess_received_gradients(d, msgs, own_noisy)
+        msgs           = received.get(d.id, [])
+        own_noisy      = noisy_gradients.get(d.id)
+        own_compressed = compressed_gradients.get(d.id) if compressed_gradients else None
+        all_quality[d.id] = assess_received_gradients(
+            d, msgs, own_noisy, own_compressed
+        )
     return all_quality

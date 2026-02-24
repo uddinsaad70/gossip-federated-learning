@@ -34,7 +34,8 @@ import numpy as np
 # Step 1: Message Preparation
 # PDF Section 3.4, Step 1
 # ──────────────────────────────────────────
-def prepare_message(device, noisy_gradient: dict, round_num: int) -> dict:
+def prepare_message(device, noisy_gradient: dict, round_num: int,
+                    compressed_gradient: dict = None) -> dict:
     """
     Packages ∇W_noisy + metadata into a message.
     This is what gets sent to each neighbor.
@@ -47,22 +48,31 @@ def prepare_message(device, noisy_gradient: dict, round_num: int) -> dict:
             'metadata': {'compression_ratio': 0.156, 'dct_mask': [...]}
         }
     """
-    gradient_data = {}
-    metadata      = {}
+    gradient_data   = {}
+    compressed_data = {}
+    metadata        = {}
 
     for name, pkg in noisy_gradient.items():
-        gradient_data[name] = pkg["data"]       # noisy tensor
+        gradient_data[name] = pkg["data"]   # noisy tensor (Phase 3) → aggregation
         metadata[name] = {
             "Cr":             pkg["Cr"],
             "mask":           pkg["mask"],
             "original_shape": pkg["original_shape"],
         }
 
+    # Pre-noise compressed gradient (Phase 2 output) for Byzantine detection
+    # Sign-flip is visible here: cos_sim = -1.0
+    # After noise (Phase 3): cos_sim = 0 (noise dominates)
+    if compressed_gradient is not None:
+        for name, pkg in compressed_gradient.items():
+            compressed_data[name] = pkg["data"]
+
     return {
-        "sender":   device.id,
-        "round":    round_num,
-        "gradient": gradient_data,
-        "metadata": metadata,
+        "sender":     device.id,
+        "round":      round_num,
+        "gradient":   gradient_data,     # noisy  → Phase 6 aggregation
+        "compressed": compressed_data,   # clean  → Phase 5 detection
+        "metadata":   metadata,
     }
 
 
@@ -71,7 +81,8 @@ def prepare_message(device, noisy_gradient: dict, round_num: int) -> dict:
 # PDF Section 3.4, Step 2
 # ──────────────────────────────────────────
 def gossip_exchange(devices: list, noisy_gradients: dict,
-                    round_num: int) -> dict:
+                    round_num: int,
+                    compressed_gradients: dict = None) -> dict:
     """
     Every device sends its message to all neighbors.
     Every device receives messages from all neighbors.
@@ -95,7 +106,8 @@ def gossip_exchange(devices: list, noisy_gradients: dict,
     outbox = {}
     for d in devices:
         if d.id in noisy_gradients:
-            outbox[d.id] = prepare_message(d, noisy_gradients[d.id], round_num)
+            comp = compressed_gradients.get(d.id) if compressed_gradients else None
+            outbox[d.id] = prepare_message(d, noisy_gradients[d.id], round_num, comp)
 
     # Deliver messages — bidirectional
     received = {d.id: [] for d in devices}
