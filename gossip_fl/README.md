@@ -135,3 +135,6 @@ The base paper distributes data proportionately across clients without specifyin
 | 4     | gossip.py                       | ✅ Complete                                                |
 | 5     | byzantine.py                    | ⚠️ Complete — Byzantine detection issue present, needs fix |
 | 6     | aggregation.py, main.py         | ✅ Complete                                                |
+
+
+![Network Topology](topology_20devices.png)
